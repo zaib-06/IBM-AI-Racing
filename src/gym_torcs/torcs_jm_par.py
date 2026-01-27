@@ -552,11 +552,11 @@ def apply_brakes(S, min_track_ahead):
     
     # EXTREME MINIMAL BRAKING - Only for emergencies
     if min_track_ahead < 15:  # Very close emergency!
-        brake = 0.70
+        brake = 0.50
     elif min_track_ahead < 25:  # Close
-        brake = 0.40
-    elif min_track_ahead < 35:  # Medium
         brake = 0.20
+    elif min_track_ahead < 35:  # Medium
+        brake = 0.10
     # Above 35m: No braking!
     
     # Only emergency angle braking
