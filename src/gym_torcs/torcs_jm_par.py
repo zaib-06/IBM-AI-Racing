@@ -486,109 +486,125 @@ def drive_example(c):
 import math
 
 # ================= USER CONFIGURABLE PARAMETERS =================
-TARGET_SPEED = 180  # Racing speed!
-STEER_GAIN = 18     # Smooth steering
-CENTERING_GAIN = 0.18  # More freedom for racing line
-BRAKE_THRESHOLD = 0.60  # Higher - don't brake on small angles
-GEAR_SPEEDS = [0, 50, 90, 125, 160, 195]  # Racing shift points
+TARGET_SPEED = 185  # Top speed on straights
+MIN_TARGET_SPEED = 85  # Lowest target speed in tight corners
+STEER_GAIN = 16.0     # Base steering gain
+SPEED_STEER_GAIN = 0.0025  # Reduce steering at high speeds
+CENTERING_GAIN = 0.22  # Keep away from walls
+EDGE_POS_LIMIT = 0.85  # Slow down if close to track edge
+LOOKAHEAD_BONUS = 2.2  # More speed if sensors show open road
+ANGLE_PENALTY = 55.0   # Reduce target speed with angle
+STEER_PENALTY = 45.0   # Reduce target speed with steering
+TRACKPOS_PENALTY = 30.0  # Reduce target speed if off-center
+BRAKE_MARGIN = 4.0     # km/h buffer before braking
+BRAKE_GAIN = 0.04      # Brake intensity per km/h over target
+MAX_BRAKE = 0.9
+GEAR_UP_RPM = 8500
+GEAR_DOWN_RPM = 3200
 ENABLE_TRACTION_CONTROL = True  # Keep enabled
+# Laguna Seca guide-inspired corner targets (km/h)
+T1T2_TARGET = 95   # Andretti Hairpin apex 80-100
+T3_TARGET = 115    # Turn 3 apex 110-120
+T4_TARGET = 125    # Turn 4 apex 120-130
+T5_TARGET = 105    # Turn 5 apex 100-110
+T6_TARGET = 135    # Turn 6 apex 130-140
+CORKSCREW_TARGET = 75  # Turns 7-8 apex 70-80
+T9_TARGET = 145    # Turn 9 apex 140-150
+T10_TARGET = 125   # Turn 10 apex 120-130
+T11_TARGET = 65    # Turn 11 apex 60-70
 
 # ================= HELPER FUNCTIONS =================
 def calculate_steering(S):
     """Calculate steering based on angle and track position"""
-    steer = (S['angle'] * STEER_GAIN / math.pi) - (S['trackPos'] * CENTERING_GAIN)
+    speed = max(1.0, S['speedX'])
+    steer_gain = STEER_GAIN * (1.0 / (1.0 + SPEED_STEER_GAIN * speed))
+    steer = (S['angle'] * steer_gain / math.pi) - (S['trackPos'] * CENTERING_GAIN)
     return max(-1, min(1, steer))
 
-def calculate_throttle(S, R, min_track_ahead):
-    """MAXIMUM THROTTLE - Keep speed up!"""
-    # VERY HIGH target speeds
-    if min_track_ahead < 20:
-        adjusted_target = 110  # Still fast even in tightest
-    elif min_track_ahead < 35:
-        adjusted_target = 145
-    elif min_track_ahead < 50:
-        adjusted_target = 165
-    else:
-        adjusted_target = TARGET_SPEED
-    
-    # Minimal speed reduction
-    adjusted_target -= abs(R['steer']) * 10  # Very little reduction
-    
-    # Aggressive throttle - almost always on
-    speed_diff = adjusted_target - S['speedX']
-    
-    if speed_diff > 10:
-        accel = 1.0  # Full throttle
-    elif speed_diff > -10:
-        accel = 0.9  # High throttle
-    else:
-        accel = 0.7  # Still decent throttle
-    
-    # Boost at low speeds
-    if S['speedX'] < 5:
+def calculate_target_speed(S, R, min_track_ahead, avg_track_ahead):
+    """Compute a safe target speed based on lookahead and stability."""
+    base = MIN_TARGET_SPEED + LOOKAHEAD_BONUS * avg_track_ahead
+    base = min(TARGET_SPEED, max(MIN_TARGET_SPEED, base))
+    base -= abs(S['angle']) * ANGLE_PENALTY
+    base -= abs(R['steer']) * STEER_PENALTY
+    base -= abs(S['trackPos']) * TRACKPOS_PENALTY
+    if abs(S['trackPos']) > EDGE_POS_LIMIT:
+        base -= 25.0
+    # Guide-based corner targeting using lookahead + elevation cues
+    # Tight hairpins / very short lookahead
+    if min_track_ahead < 22:
+        base = min(base, T11_TARGET)
+    elif min_track_ahead < 28:
+        base = min(base, T1T2_TARGET)
+    elif min_track_ahead < 34:
+        base = min(base, T5_TARGET)
+    elif min_track_ahead < 42:
+        base = min(base, T3_TARGET)
+    elif min_track_ahead < 55:
+        base = min(base, T4_TARGET)
+    # Corkscrew: downhill + tight lookahead
+    if S.get('speedZ', 0) < -0.6 and min_track_ahead < 35:
+        base = min(base, CORKSCREW_TARGET)
+    # Rainey Curve (T9): downhill but open
+    if S.get('speedZ', 0) < -0.4 and min_track_ahead > 60:
+        base = min(base, T9_TARGET)
+    # Turn 10: medium-speed right after downhill
+    if min_track_ahead < 45 and S.get('speedZ', 0) > -0.2:
+        base = min(base, T10_TARGET)
+    return max(MIN_TARGET_SPEED, min(TARGET_SPEED, base))
+
+def calculate_throttle(S, R, target_speed):
+    """Smooth throttle control to meet target speed."""
+    speed_diff = target_speed - S['speedX']
+    if speed_diff > 12:
         accel = 1.0
-    elif S['speedX'] < 20:
+    elif speed_diff > 6:
+        accel = 0.8
+    elif speed_diff > 0:
+        accel = 0.55
+    else:
+        accel = 0.15
+    if S['speedX'] < 10:
         accel = max(accel, 0.9)
-    
-    # Only reduce throttle if REALLY hard braking
-    if R['brake'] > 0.8:
-        accel *= 0.5
-    elif R['brake'] > 0.6:
-        accel *= 0.7
-    # Otherwise keep throttle!
-    
+    if R['brake'] > 0.4:
+        accel *= 0.6
     return max(0.0, min(1.0, accel))
 
-def apply_brakes(S, min_track_ahead):
-    """MINIMAL BRAKING - Testing version to see what's happening"""
-    current_angle = abs(S['angle'])
-    current_speed = S['speedX']
-    
-    # Don't brake if we're barely moving
-    if current_speed < 15:
+def apply_brakes(S, target_speed):
+    """Brake if over target speed with a gentle ramp."""
+    speed = S['speedX']
+    if speed < 10:
         return 0.0
-    
-    brake = 0.0
-    
-    # EXTREME MINIMAL BRAKING - Only for emergencies
-    if min_track_ahead < 15:  # Very close emergency!
-        brake = 0.50
-    elif min_track_ahead < 25:  # Close
-        brake = 0.20
-    elif min_track_ahead < 35:  # Medium
-        brake = 0.10
-    # Above 35m: No braking!
-    
-    # Only emergency angle braking
-    if current_angle > 1.2:  # Extremely sharp
-        brake = max(brake, 0.70)
-    elif current_angle > 0.9:
-        brake = max(brake, 0.50)
-    
-    return min(brake, 1.0)
+    over = speed - (target_speed + BRAKE_MARGIN)
+    if over <= 0:
+        return 0.0
+    brake = min(MAX_BRAKE, over * BRAKE_GAIN)
+    if abs(S['trackPos']) > EDGE_POS_LIMIT:
+        brake = max(brake, 0.35)
+    return brake
 
 def shift_gears(S):
-    """Shift gears based on speed - NEVER use gear 1 except at start!"""
+    """Shift gears based on RPM with speed fallback."""
+    gear = int(S.get('gear', 1))
+    rpm = S.get('rpm', 0)
     speed = S['speedX']
-    
-    # Gear 1 ONLY for very low speeds (starting)
-    if speed < 20:
+    if rpm and gear > 0:
+        if rpm > GEAR_UP_RPM and gear < 6:
+            return gear + 1
+        if rpm < GEAR_DOWN_RPM and gear > 1:
+            return gear - 1
+        return gear
+    if speed < 25:
         return 1
-    # Gear 2 for low speeds and tight corners
-    elif speed < 60:
+    if speed < 60:
         return 2
-    # Gear 3 for medium speeds
-    elif speed < 95:
+    if speed < 95:
         return 3
-    # Gear 4 for higher speeds  
-    elif speed < 130:
+    if speed < 130:
         return 4
-    # Gear 5 for fast speeds
-    elif speed < 165:
+    if speed < 165:
         return 5
-    # Gear 6 for maximum speed
-    else:
-        return 6
+    return 6
 
 def traction_control(S, accel):
     """Reduce acceleration if wheels are spinning"""
@@ -647,11 +663,13 @@ def drive_modular(c):
     ahead_center = track[9] if len(track) > 9 else 200
     ahead_right = track[10] if len(track) > 10 else 200
     min_track_ahead = min(ahead_left, ahead_center, ahead_right)
+    avg_track_ahead = (ahead_left + ahead_center + ahead_right) / 3.0
     
     # NORMAL DRIVING
     R['steer'] = calculate_steering(S)
-    R['brake'] = apply_brakes(S, min_track_ahead)
-    R['accel'] = calculate_throttle(S, R, min_track_ahead)
+    target_speed = calculate_target_speed(S, R, min_track_ahead, avg_track_ahead)
+    R['brake'] = apply_brakes(S, target_speed)
+    R['accel'] = calculate_throttle(S, R, target_speed)
     R['accel'] = traction_control(S, R['accel'])
     R['gear'] = shift_gears(S)
     
