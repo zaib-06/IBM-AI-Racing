@@ -1,4 +1,3 @@
-
 import socket
 import sys
 import getopt
@@ -474,13 +473,9 @@ def drive_example(c):
         R['gear']=6
     return
 
-if __name__ == "__main__":
-    C= Client(p=3001)
-    for step in range(C.maxSteps,0,-1):
-        C.get_servers_input()
-        drive_example(C)
-        C.respond_to_server()
-    C.shutdown()
+# NOTE: The drive_example function above is just a basic example.
+# The improved drive_modular function below is what actually runs!
+# See the main loop at the bottom of this file.
 
 
 
@@ -491,58 +486,184 @@ if __name__ == "__main__":
 import math
 
 # ================= USER CONFIGURABLE PARAMETERS =================
-TARGET_SPEED = 100  # Target speed in km/h. Increasing this makes the car go faster but may reduce stability.
-STEER_GAIN = 30     # Steering sensitivity. Higher values make the car turn more aggressively.
-CENTERING_GAIN = 0.20  # How strongly the car corrects its position toward the center of the track.
-BRAKE_THRESHOLD = 0.9  # Angle threshold for braking. Lower values brake earlier.
-GEAR_SPEEDS = [0, 20, 40, 80, 100, 180]  # Speed thresholds for gear shifting.
-ENABLE_TRACTION_CONTROL = True  # Toggle traction control system.
+TARGET_SPEED = 180  # Racing speed!
+STEER_GAIN = 18     # Smooth steering
+CENTERING_GAIN = 0.18  # More freedom for racing line
+BRAKE_THRESHOLD = 0.60  # Higher - don't brake on small angles
+GEAR_SPEEDS = [0, 50, 90, 125, 160, 195]  # Racing shift points
+ENABLE_TRACTION_CONTROL = True  # Keep enabled
 
 # ================= HELPER FUNCTIONS =================
 def calculate_steering(S):
+    """Calculate steering based on angle and track position"""
     steer = (S['angle'] * STEER_GAIN / math.pi) - (S['trackPos'] * CENTERING_GAIN)
     return max(-1, min(1, steer))
 
-def calculate_throttle(S, R):
-    if S['speedX'] < TARGET_SPEED - (R['steer'] * 2.5):
-        accel = min(1.0, R['accel'] + 0.4)
+def calculate_throttle(S, R, min_track_ahead):
+    """MAXIMUM THROTTLE - Keep speed up!"""
+    # VERY HIGH target speeds
+    if min_track_ahead < 20:
+        adjusted_target = 110  # Still fast even in tightest
+    elif min_track_ahead < 35:
+        adjusted_target = 145
+    elif min_track_ahead < 50:
+        adjusted_target = 165
     else:
-        accel = max(0.0, R['accel'] - 0.2)
-    if S['speedX'] < 10:
-        accel += 1 / (S['speedX'] + 0.1)
+        adjusted_target = TARGET_SPEED
+    
+    # Minimal speed reduction
+    adjusted_target -= abs(R['steer']) * 10  # Very little reduction
+    
+    # Aggressive throttle - almost always on
+    speed_diff = adjusted_target - S['speedX']
+    
+    if speed_diff > 10:
+        accel = 1.0  # Full throttle
+    elif speed_diff > -10:
+        accel = 0.9  # High throttle
+    else:
+        accel = 0.7  # Still decent throttle
+    
+    # Boost at low speeds
+    if S['speedX'] < 5:
+        accel = 1.0
+    elif S['speedX'] < 20:
+        accel = max(accel, 0.9)
+    
+    # Only reduce throttle if REALLY hard braking
+    if R['brake'] > 0.8:
+        accel *= 0.5
+    elif R['brake'] > 0.6:
+        accel *= 0.7
+    # Otherwise keep throttle!
+    
     return max(0.0, min(1.0, accel))
 
-def apply_brakes(S):
-    return 0.3 if abs(S['angle']) > BRAKE_THRESHOLD else 0.0
+def apply_brakes(S, min_track_ahead):
+    """MINIMAL BRAKING - Testing version to see what's happening"""
+    current_angle = abs(S['angle'])
+    current_speed = S['speedX']
+    
+    # Don't brake if we're barely moving
+    if current_speed < 15:
+        return 0.0
+    
+    brake = 0.0
+    
+    # EXTREME MINIMAL BRAKING - Only for emergencies
+    if min_track_ahead < 15:  # Very close emergency!
+        brake = 0.70
+    elif min_track_ahead < 25:  # Close
+        brake = 0.40
+    elif min_track_ahead < 35:  # Medium
+        brake = 0.20
+    # Above 35m: No braking!
+    
+    # Only emergency angle braking
+    if current_angle > 1.2:  # Extremely sharp
+        brake = max(brake, 0.70)
+    elif current_angle > 0.9:
+        brake = max(brake, 0.50)
+    
+    return min(brake, 1.0)
 
 def shift_gears(S):
-    gear = 1
-    for i, speed in enumerate(GEAR_SPEEDS):
-        if S['speedX'] > speed:
-            gear = i + 1
-    return min(gear, 6)
+    """Shift gears based on speed - NEVER use gear 1 except at start!"""
+    speed = S['speedX']
+    
+    # Gear 1 ONLY for very low speeds (starting)
+    if speed < 20:
+        return 1
+    # Gear 2 for low speeds and tight corners
+    elif speed < 60:
+        return 2
+    # Gear 3 for medium speeds
+    elif speed < 95:
+        return 3
+    # Gear 4 for higher speeds  
+    elif speed < 130:
+        return 4
+    # Gear 5 for fast speeds
+    elif speed < 165:
+        return 5
+    # Gear 6 for maximum speed
+    else:
+        return 6
 
 def traction_control(S, accel):
+    """Reduce acceleration if wheels are spinning"""
     if ENABLE_TRACTION_CONTROL:
-        if ((S['wheelSpinVel'][2] + S['wheelSpinVel'][3]) - (S['wheelSpinVel'][0] + S['wheelSpinVel'][1])) > 2:
-            accel -= 0.1
+        wheel_spin = ((S['wheelSpinVel'][2] + S['wheelSpinVel'][3]) - 
+                     (S['wheelSpinVel'][0] + S['wheelSpinVel'][1]))
+        if wheel_spin > 5:
+            accel *= 0.5
+        elif wheel_spin > 2:
+            accel -= 0.2
     return max(0.0, accel)
 
 # ================= MAIN DRIVE FUNCTION =================
+
+# Stuck detection variables
+last_speeds = []
+stuck_counter = 0
+step_counter = 0
+
 def drive_modular(c):
+    """
+    Improved driving function with DETAILED DEBUGGING
+    """
+    global last_speeds, stuck_counter, step_counter
+    step_counter += 1
+    
     S, R = c.S.d, c.R.d
+    
+    # STUCK DETECTION - Check if we're not actually moving
+    last_speeds.append(S['speedX'])
+    if len(last_speeds) > 50:  # Check last 50 readings (1 second)
+        last_speeds.pop(0)
+        
+        # If speed hasn't changed more than 0.5 km/h in 1 second, we're STUCK
+        speed_variance = max(last_speeds) - min(last_speeds)
+        if speed_variance < 0.5 and S['speedX'] > 10:
+            stuck_counter += 1
+        else:
+            stuck_counter = 0
+    
+    # STUCK RECOVERY MODE
+    if stuck_counter > 25:  # Stuck for 0.5 seconds
+        R['gear'] = -1  # Reverse!
+        R['accel'] = 1.0
+        R['brake'] = 0.0
+        R['steer'] = 0.5 if stuck_counter % 100 < 50 else -0.5  # Alternate steering
+        
+        if stuck_counter > 100:  # Reset after trying
+            stuck_counter = 0
+            last_speeds = []
+        return
+    
+    # GET TRACK SENSORS
+    track = S['track']
+    ahead_left = track[8] if len(track) > 8 else 200
+    ahead_center = track[9] if len(track) > 9 else 200
+    ahead_right = track[10] if len(track) > 10 else 200
+    min_track_ahead = min(ahead_left, ahead_center, ahead_right)
+    
+    # NORMAL DRIVING
     R['steer'] = calculate_steering(S)
-    R['accel'] = calculate_throttle(S, R)
-    R['brake'] = apply_brakes(S)
+    R['brake'] = apply_brakes(S, min_track_ahead)
+    R['accel'] = calculate_throttle(S, R, min_track_ahead)
     R['accel'] = traction_control(S, R['accel'])
     R['gear'] = shift_gears(S)
-    return
+    
 
 # ================= MAIN LOOP =================
+# This is the ONLY main loop - it uses drive_modular with predictive braking!
 if __name__ == "__main__":
+    print("Starting TORCS AI with improved drive_modular function...")
+    print("Using predictive braking for Corkscrew track!")
     C = Client(p=3001)
     for step in range(C.maxSteps, 0, -1):
         C.get_servers_input()
-        drive_modular(C)
+        drive_modular(C)  # Uses the improved function with track sensors!
         C.respond_to_server()
-    C.shutdown()
+    C.shutdown()  # Only shutdown after race completes
