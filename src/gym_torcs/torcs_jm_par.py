@@ -631,7 +631,6 @@ def drive_modular(c):
     
     # STUCK RECOVERY MODE
     if stuck_counter > 25:  # Stuck for 0.5 seconds
-        print(f"⚠️  STEP {step_counter}: STUCK! Speed variance: {speed_variance:.2f} - Reversing...")
         R['gear'] = -1  # Reverse!
         R['accel'] = 1.0
         R['brake'] = 0.0
