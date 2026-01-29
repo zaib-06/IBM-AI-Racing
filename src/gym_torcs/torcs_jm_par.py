@@ -380,7 +380,7 @@ class DriverAction():
         self.d['brake']= clip(self.d['brake'], 0, 1)
         self.d['accel']= clip(self.d['accel'], 0, 1)
         self.d['clutch']= clip(self.d['clutch'], 0, 1)
-        if self.d['gear'] not in [-1, 0, 1, 2, 3, 4, 5, 6]:
+        if self.d['gear'] not in [-1, 0, 1, 2, 3, 4, 5, 6, 7]:
             self.d['gear']= 0
         if self.d['meta'] not in [0,1]:
             self.d['meta']= 0
@@ -499,8 +499,9 @@ TRACKPOS_PENALTY = 30.0  # Reduce target speed if off-center
 BRAKE_MARGIN = 4.0     # km/h buffer before braking
 BRAKE_GAIN = 0.04      # Brake intensity per km/h over target
 MAX_BRAKE = 0.9
-GEAR_UP_RPM = 8500
-GEAR_DOWN_RPM = 3200
+# Open-wheel (sc-f1) revs limiter ~18700 in TORCS data
+GEAR_UP_RPM = 18000
+GEAR_DOWN_RPM = 9000
 ENABLE_TRACTION_CONTROL = True  # Keep enabled
 # Laguna Seca guide-inspired corner targets (km/h)
 T1T2_TARGET = 95   # Andretti Hairpin apex 80-100
@@ -508,7 +509,7 @@ T3_TARGET = 115    # Turn 3 apex 110-120
 T4_TARGET = 125    # Turn 4 apex 120-130
 T5_TARGET = 105    # Turn 5 apex 100-110
 T6_TARGET = 135    # Turn 6 apex 130-140
-CORKSCREW_TARGET = 75  # Turns 7-8 apex 70-80
+CORKSCREW_TARGET = 50  # Turns 7-8 apex 70-80
 T9_TARGET = 145    # Turn 9 apex 140-150
 T10_TARGET = 125   # Turn 10 apex 120-130
 T11_TARGET = 65    # Turn 11 apex 60-70
@@ -543,8 +544,11 @@ def calculate_target_speed(S, R, min_track_ahead, avg_track_ahead):
     elif min_track_ahead < 55:
         base = min(base, T4_TARGET)
     # Corkscrew: downhill + tight lookahead
-    if S.get('speedZ', 0) < -0.6 and min_track_ahead < 35:
+    # Corkscrew: detect earlier (downhill-ish + tightish lookahead) and force low speed
+    speedZ = S.get('speedZ', 0)
+    if (speedZ < -0.30 and min_track_ahead < 60) or (speedZ < -0.45 and min_track_ahead < 75):
         base = min(base, CORKSCREW_TARGET)
+
     # Rainey Curve (T9): downhill but open
     if S.get('speedZ', 0) < -0.4 and min_track_ahead > 60:
         base = min(base, T9_TARGET)
@@ -589,7 +593,7 @@ def shift_gears(S):
     rpm = S.get('rpm', 0)
     speed = S['speedX']
     if rpm and gear > 0:
-        if rpm > GEAR_UP_RPM and gear < 6:
+        if rpm > GEAR_UP_RPM and gear < 7:
             return gear + 1
         if rpm < GEAR_DOWN_RPM and gear > 1:
             return gear - 1
@@ -604,8 +608,9 @@ def shift_gears(S):
         return 4
     if speed < 165:
         return 5
-    return 6
-
+    if speed < 200:
+        return 6
+    return 7
 def traction_control(S, accel):
     """Reduce acceleration if wheels are spinning"""
     if ENABLE_TRACTION_CONTROL:
@@ -640,7 +645,7 @@ def drive_modular(c):
         
         # If speed hasn't changed more than 0.5 km/h in 1 second, we're STUCK
         speed_variance = max(last_speeds) - min(last_speeds)
-        if speed_variance < 0.5 and S['speedX'] > 10:
+        if speed_variance < 0.5 and S['speedX'] < 10:
             stuck_counter += 1
         else:
             stuck_counter = 0
@@ -671,6 +676,12 @@ def drive_modular(c):
     R['brake'] = apply_brakes(S, target_speed)
     R['accel'] = calculate_throttle(S, R, target_speed)
     R['accel'] = traction_control(S, R['accel'])
+    # Hard corkscrew enforcement to reach ~50 km/h
+    speedZ = S.get('speedZ', 0)
+    in_corkscrew = (speedZ < -0.30 and min_track_ahead < 60) or (speedZ < -0.45 and min_track_ahead < 75)
+    if in_corkscrew and S.get('speedX', 0) > (CORKSCREW_TARGET + 5):
+        R['brake'] = max(R['brake'], 0.7)
+        R['accel'] = min(R['accel'], 0.1)
     R['gear'] = shift_gears(S)
     
 
