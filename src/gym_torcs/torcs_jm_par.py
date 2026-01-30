@@ -485,218 +485,322 @@ def drive_example(c):
 
 import math
 
-# ================= USER CONFIGURABLE PARAMETERS =================
-TARGET_SPEED = 185  # Top speed on straights
-MIN_TARGET_SPEED = 85  # Lowest target speed in tight corners
-STEER_GAIN = 16.0     # Base steering gain
-SPEED_STEER_GAIN = 0.0025  # Reduce steering at high speeds
-CENTERING_GAIN = 0.22  # Keep away from walls
-EDGE_POS_LIMIT = 0.85  # Slow down if close to track edge
-LOOKAHEAD_BONUS = 2.2  # More speed if sensors show open road
-ANGLE_PENALTY = 55.0   # Reduce target speed with angle
-STEER_PENALTY = 45.0   # Reduce target speed with steering
-TRACKPOS_PENALTY = 30.0  # Reduce target speed if off-center
-BRAKE_MARGIN = 4.0     # km/h buffer before braking
-BRAKE_GAIN = 0.04      # Brake intensity per km/h over target
-MAX_BRAKE = 0.9
-# Open-wheel (sc-f1) revs limiter ~18700 in TORCS data
-GEAR_UP_RPM = 18000
-GEAR_DOWN_RPM = 9000
-ENABLE_TRACTION_CONTROL = True  # Keep enabled
-# Laguna Seca guide-inspired corner targets (km/h)
-T1T2_TARGET = 95   # Andretti Hairpin apex 80-100
-T3_TARGET = 115    # Turn 3 apex 110-120
-T4_TARGET = 125    # Turn 4 apex 120-130
-T5_TARGET = 105    # Turn 5 apex 100-110
-T6_TARGET = 135    # Turn 6 apex 130-140
-CORKSCREW_TARGET = 50  # Turns 7-8 apex 70-80
-T9_TARGET = 145    # Turn 9 apex 140-150
-T10_TARGET = 125   # Turn 10 apex 120-130
-T11_TARGET = 65    # Turn 11 apex 60-70
+# ================= OPTIMIZED PARAMETERS FOR LAGUNA SECA =================
+# Speed targets
+TARGET_SPEED = 300  # Maximum speed on straights (F1 capable)
+MIN_TARGET_SPEED = 45  # Absolute minimum for hairpins
 
-# ================= HELPER FUNCTIONS =================
+# Steering dynamics
+STEER_GAIN = 18.5  # Increased for sharper response
+SPEED_STEER_GAIN = 0.0018  # Less reduction at speed for better cornering
+CENTERING_GAIN = 0.28  # Stronger track centering
+
+# Speed penalties (reduced for more aggressive driving)
+ANGLE_PENALTY = 38.0  # Less penalty for attack angle
+STEER_PENALTY = 32.0  # Less penalty for steering input
+TRACKPOS_PENALTY = 22.0  # Less penalty off-center
+
+# Lookahead bonuses
+LOOKAHEAD_GAIN = 2.8  # More aggressive with open road ahead
+EDGE_LIMIT = 0.92  # Allow closer to edge before slowing
+
+# Braking parameters (trail braking capable)
+BRAKE_THRESHOLD = 2.5  # Smaller margin for late braking
+BRAKE_INTENSITY = 0.055  # More aggressive braking
+MAX_BRAKE = 1.0  # Full ABS capability
+TRAIL_BRAKE_FACTOR = 0.35  # Maintain some brake into apex
+
+# Gear shift points optimized for F1
+GEAR_UP_RPM = 18200  # Shift closer to limiter
+GEAR_DOWN_RPM = 8200  # Lower downshift for engine braking
+
+# Traction control (refined)
+TC_ENABLED = True
+TC_SLIP_THRESHOLD = 3.5  # Allow more slip before cutting power
+TC_REDUCTION = 0.35  # Less aggressive reduction
+
+# Corner-specific targets (km/h) - Laguna Seca optimized
+TURN1_SPEED = 110  # Turn 1 entry
+ANDRETTI_HAIRPIN = 72  # Turn 2 apex (tightest)
+TURN3_SPEED = 135  # Turn 3 (uphill left)
+TURN4_SPEED = 145  # Turn 4 (continuing uphill)
+TURN5_SPEED = 118  # Turn 5 (downhill right)
+TURN6_SPEED = 155  # Turn 6 (fast left before Corkscrew)
+CORKSCREW_ENTRY = 95  # Turn 8 entry (iconic drop)
+CORKSCREW_EXIT = 65  # Turn 8a exit
+RAINEY_CURVE = 165  # Turn 9 (downhill sweeper)
+TURN10_SPEED = 138  # Turn 10 (right after Rainey)
+TURN11_SPEED = 75  # Turn 11 (final hairpin before front straight)
+
+# ================= ADVANCED HELPER FUNCTIONS =================
 def calculate_steering(S):
-    """Calculate steering based on angle and track position"""
+    """Advanced steering with predictive element"""
+    track = S['track']
     speed = max(1.0, S['speedX'])
-    steer_gain = STEER_GAIN * (1.0 / (1.0 + SPEED_STEER_GAIN * speed))
-    steer = (S['angle'] * steer_gain / math.pi) - (S['trackPos'] * CENTERING_GAIN)
-    return max(-1, min(1, steer))
+    
+    # Dynamic steering gain based on speed
+    base_gain = STEER_GAIN / (1.0 + SPEED_STEER_GAIN * speed)
+    
+    # Basic steering from angle and position
+    steer = (S['angle'] * base_gain / math.pi) - (S['trackPos'] * CENTERING_GAIN)
+    
+    # Predictive steering: look at left/right sensors
+    if len(track) >= 19:
+        left_sensor = track[0:5]  # Far left sensors
+        right_sensor = track[14:19]  # Far right sensors
+        left_avg = sum(left_sensor) / len(left_sensor)
+        right_avg = sum(right_sensor) / len(right_sensor)
+        
+        # Steer toward more open side
+        sensor_diff = (left_avg - right_avg) * 0.008
+        steer += sensor_diff
+    
+    return max(-1.0, min(1.0, steer))
 
-def calculate_target_speed(S, R, min_track_ahead, avg_track_ahead):
-    """Compute a safe target speed based on lookahead and stability."""
-    base = MIN_TARGET_SPEED + LOOKAHEAD_BONUS * avg_track_ahead
+def identify_corner(S, min_ahead, speedZ, distFromStart):
+    """Identify which corner we're approaching based on track characteristics"""
+    dist = distFromStart % 3610  # Laguna Seca lap length ~3.6km
+    
+    # Turn 1 (0-250m): Medium-fast right
+    if 0 <= dist < 250 and min_ahead < 80:
+        return ('TURN1', TURN1_SPEED)
+    
+    # Andretti Hairpin T2 (250-450m): Slowest corner
+    if 250 <= dist < 450 and min_ahead < 25:
+        return ('ANDRETTI', ANDRETTI_HAIRPIN)
+    
+    # Turn 3 (450-800m): Uphill left
+    if 450 <= dist < 800 and min_ahead < 50:
+        return ('TURN3', TURN3_SPEED)
+    
+    # Turn 4 (800-1100m): Continuing uphill
+    if 800 <= dist < 1100 and min_ahead < 60:
+        return ('TURN4', TURN4_SPEED)
+    
+    # Turn 5 (1100-1400m): Downhill right
+    if 1100 <= dist < 1400 and speedZ < -0.3:
+        return ('TURN5', TURN5_SPEED)
+    
+    # Turn 6 (1400-1700m): Fast left before Corkscrew
+    if 1400 <= dist < 1700 and min_ahead < 70:
+        return ('TURN6', TURN6_SPEED)
+    
+    # Corkscrew (1700-2000m): Iconic downhill section
+    if 1700 <= dist < 2000 and speedZ < -0.5:
+        if min_ahead < 50:
+            return ('CORKSCREW', CORKSCREW_ENTRY)
+        else:
+            return ('CORKSCREW_EXIT', CORKSCREW_EXIT)
+    
+    # Rainey Curve T9 (2000-2400m): Fast downhill sweeper
+    if 2000 <= dist < 2400 and speedZ < -0.25 and min_ahead > 60:
+        return ('RAINEY', RAINEY_CURVE)
+    
+    # Turn 10 (2400-2700m): Medium right
+    if 2400 <= dist < 2700 and min_ahead < 55:
+        return ('TURN10', TURN10_SPEED)
+    
+    # Turn 11 (2700-3100m): Final hairpin
+    if 2700 <= dist < 3100 and min_ahead < 28:
+        return ('TURN11', TURN11_SPEED)
+    
+    return ('STRAIGHT', TARGET_SPEED)
+
+def calculate_target_speed(S, R, min_ahead, avg_ahead):
+    """Calculate optimal target speed using corner recognition"""
+    speedZ = S.get('speedZ', 0)
+    distFromStart = S.get('distFromStart', 0)
+    
+    # Identify corner and get target
+    corner_name, corner_target = identify_corner(S, min_ahead, speedZ, distFromStart)
+    
+    # Base speed from lookahead
+    base = MIN_TARGET_SPEED + LOOKAHEAD_GAIN * avg_ahead
     base = min(TARGET_SPEED, max(MIN_TARGET_SPEED, base))
+    
+    # Apply corner-specific target
+    base = min(base, corner_target)
+    
+    # Dynamic penalties
     base -= abs(S['angle']) * ANGLE_PENALTY
     base -= abs(R['steer']) * STEER_PENALTY
     base -= abs(S['trackPos']) * TRACKPOS_PENALTY
-    if abs(S['trackPos']) > EDGE_POS_LIMIT:
-        base -= 25.0
-    # Guide-based corner targeting using lookahead + elevation cues
-    # Tight hairpins / very short lookahead
-    if min_track_ahead < 22:
-        # Use distFromStart to separate T1/2 from the final hairpin (T11).
-        if S.get('distFromStart', 0) < 400:
-            base = min(base, T1T2_TARGET)
-        else:
-            base = min(base, T11_TARGET)
-    elif min_track_ahead < 28:
-        base = min(base, T1T2_TARGET)
-    elif min_track_ahead < 34:
-        base = min(base, T5_TARGET)
-    elif min_track_ahead < 42:
-        base = min(base, T3_TARGET)
-    elif min_track_ahead < 55:
-        base = min(base, T4_TARGET)
-    # Corkscrew: downhill + tight lookahead
-    # Corkscrew: only enforce at the sudden drop (avoid slowing for too long)
-    speedZ = S.get('speedZ', 0)
-    if (speedZ < -0.60 and min_track_ahead < 45) or (speedZ < -0.80 and min_track_ahead < 60):
-        base = min(base, CORKSCREW_TARGET)
-
-    # Rainey Curve (T9): downhill but open
-    if S.get('speedZ', 0) < -0.4 and min_track_ahead > 60:
-        base = min(base, T9_TARGET)
-    # Turn 10: medium-speed right after downhill
-    if min_track_ahead < 45 and S.get('speedZ', 0) > -0.2:
-        base = min(base, T10_TARGET)
-    return max(MIN_TARGET_SPEED, min(TARGET_SPEED, base))
+    
+    # Edge penalty
+    if abs(S['trackPos']) > EDGE_LIMIT:
+        base -= 35.0
+    
+    return max(MIN_TARGET_SPEED, base)
 
 def calculate_throttle(S, R, target_speed):
-    """Smooth throttle control to meet target speed."""
+    """Throttle control with smooth power delivery"""
     speed_diff = target_speed - S['speedX']
-    if speed_diff > 12:
+    speed = S['speedX']
+    
+    # Progressive throttle application
+    if speed_diff > 20:
         accel = 1.0
-    elif speed_diff > 6:
-        accel = 0.8
+    elif speed_diff > 10:
+        accel = 0.85
+    elif speed_diff > 5:
+        accel = 0.65
     elif speed_diff > 0:
-        accel = 0.55
+        accel = 0.40
     else:
-        accel = 0.15
-    if S['speedX'] < 10:
-        accel = max(accel, 0.9)
-    if R['brake'] > 0.4:
+        accel = 0.10
+    
+    # Launch control
+    if speed < 15:
+        accel = max(accel, 0.95)
+    
+    # Reduce power during heavy braking (trail braking)
+    if R['brake'] > 0.5:
+        accel *= 0.3
+    elif R['brake'] > 0:
         accel *= 0.6
+    
     return max(0.0, min(1.0, accel))
 
-def apply_brakes(S, target_speed):
-    """Brake if over target speed with a gentle ramp."""
+def apply_brakes(S, R, target_speed):
+    """Advanced braking with trail braking capability"""
     speed = S['speedX']
-    if speed < 10:
+    
+    # No braking at very low speeds
+    if speed < 8:
         return 0.0
-    over = speed - (target_speed + BRAKE_MARGIN)
+    
+    # Calculate overspeed
+    over = speed - (target_speed + BRAKE_THRESHOLD)
+    
     if over <= 0:
+        # Trail braking: maintain light brake pressure while cornering
+        if abs(R['steer']) > 0.3 and speed > 60:
+            return TRAIL_BRAKE_FACTOR * abs(R['steer'])
         return 0.0
-    brake = min(MAX_BRAKE, over * BRAKE_GAIN)
-    if abs(S['trackPos']) > EDGE_POS_LIMIT:
-        brake = max(brake, 0.35)
+    
+    # Progressive braking
+    brake = min(MAX_BRAKE, over * BRAKE_INTENSITY)
+    
+    # Emergency braking near edge
+    if abs(S['trackPos']) > EDGE_LIMIT:
+        brake = max(brake, 0.6)
+    
     return brake
 
 def shift_gears(S):
-    """Shift gears based on RPM with speed fallback."""
+    """Optimized gear shifting with engine braking"""
     gear = int(S.get('gear', 1))
     rpm = S.get('rpm', 0)
     speed = S['speedX']
+    
+    # RPM-based shifting (preferred)
     if rpm and gear > 0:
-        if rpm > GEAR_UP_RPM and gear < 7:
+        if rpm > GEAR_UP_RPM and gear < 6:
             return gear + 1
         if rpm < GEAR_DOWN_RPM and gear > 1:
             return gear - 1
         return gear
-    if speed < 25:
+    
+    # Speed-based fallback
+    if speed < 30:
         return 1
-    if speed < 60:
+    if speed < 70:
         return 2
-    if speed < 95:
+    if speed < 110:
         return 3
-    if speed < 130:
+    if speed < 150:
         return 4
-    if speed < 165:
+    if speed < 195:
         return 5
-    if speed < 200:
-        return 6
-    return 7
+    return 6
+
 def traction_control(S, accel):
-    """Reduce acceleration if wheels are spinning"""
-    if ENABLE_TRACTION_CONTROL:
-        wheel_spin = ((S['wheelSpinVel'][2] + S['wheelSpinVel'][3]) - 
-                     (S['wheelSpinVel'][0] + S['wheelSpinVel'][1]))
-        if wheel_spin > 5:
-            accel *= 0.5
-        elif wheel_spin > 2:
-            accel -= 0.2
+    """Refined traction control allowing controlled slip"""
+    if not TC_ENABLED:
+        return accel
+    
+    # Calculate rear wheel slip
+    rear_speed = (S['wheelSpinVel'][2] + S['wheelSpinVel'][3]) / 2.0
+    front_speed = (S['wheelSpinVel'][0] + S['wheelSpinVel'][1]) / 2.0
+    wheel_slip = rear_speed - front_speed
+    
+    # Allow some slip for better acceleration
+    if wheel_slip > TC_SLIP_THRESHOLD * 2:
+        accel *= 0.4  # Heavy reduction
+    elif wheel_slip > TC_SLIP_THRESHOLD:
+        accel *= (1.0 - TC_REDUCTION)  # Moderate reduction
+    
     return max(0.0, accel)
 
 # ================= MAIN DRIVE FUNCTION =================
 
-# Stuck detection variables
+# State tracking
 last_speeds = []
 stuck_counter = 0
-step_counter = 0
+recovery_mode = False
 
-def drive_modular(c):
+def drive_optimized(c):
     """
-    Improved driving function with DETAILED DEBUGGING
+    Optimized racing driver for Laguna Seca lap times
     """
-    global last_speeds, stuck_counter, step_counter
-    step_counter += 1
+    global last_speeds, stuck_counter, recovery_mode
     
     S, R = c.S.d, c.R.d
     
-    # STUCK DETECTION - Check if we're not actually moving
+    # === STUCK DETECTION ===
     last_speeds.append(S['speedX'])
-    if len(last_speeds) > 50:  # Check last 50 readings (1 second)
+    if len(last_speeds) > 60:
         last_speeds.pop(0)
         
-        # If speed hasn't changed more than 0.5 km/h in 1 second, we're STUCK
-        speed_variance = max(last_speeds) - min(last_speeds)
-        if speed_variance < 0.5 and S['speedX'] < 10:
+        speed_var = max(last_speeds) - min(last_speeds)
+        if speed_var < 0.3 and S['speedX'] < 8:
             stuck_counter += 1
         else:
             stuck_counter = 0
+            recovery_mode = False
     
-    # STUCK RECOVERY MODE
-    if stuck_counter > 25:  # Stuck for 0.5 seconds
-        R['gear'] = -1  # Reverse!
-        R['accel'] = 1.0
+    # === STUCK RECOVERY ===
+    if stuck_counter > 30 or recovery_mode:
+        recovery_mode = True
+        R['gear'] = -1
+        R['accel'] = 0.8
         R['brake'] = 0.0
-        R['steer'] = 0.5 if stuck_counter % 100 < 50 else -0.5  # Alternate steering
+        R['steer'] = -0.6 if stuck_counter % 80 < 40 else 0.6
         
-        if stuck_counter > 100:  # Reset after trying
+        if stuck_counter > 150:
             stuck_counter = 0
+            recovery_mode = False
             last_speeds = []
         return
     
-    # GET TRACK SENSORS
+    # === SENSOR ANALYSIS ===
     track = S['track']
+    
+    # Get critical sensors (9 is center, 8 is left-center, 10 is right-center)
     ahead_left = track[8] if len(track) > 8 else 200
     ahead_center = track[9] if len(track) > 9 else 200
     ahead_right = track[10] if len(track) > 10 else 200
-    min_track_ahead = min(ahead_left, ahead_center, ahead_right)
-    avg_track_ahead = (ahead_left + ahead_center + ahead_right) / 3.0
     
-    # NORMAL DRIVING
+    min_ahead = min(ahead_left, ahead_center, ahead_right)
+    avg_ahead = (ahead_left + ahead_center + ahead_right) / 3.0
+    
+    # === RACING LOGIC ===
     R['steer'] = calculate_steering(S)
-    target_speed = calculate_target_speed(S, R, min_track_ahead, avg_track_ahead)
-    R['brake'] = apply_brakes(S, target_speed)
+    target_speed = calculate_target_speed(S, R, min_ahead, avg_ahead)
+    R['brake'] = apply_brakes(S, R, target_speed)
     R['accel'] = calculate_throttle(S, R, target_speed)
     R['accel'] = traction_control(S, R['accel'])
-    # Hard corkscrew enforcement only at the sudden drop
-    speedZ = S.get('speedZ', 0)
-    in_corkscrew = (speedZ < -0.60 and min_track_ahead < 45) or (speedZ < -0.80 and min_track_ahead < 60)
-    if in_corkscrew and S.get('speedX', 0) > (CORKSCREW_TARGET + 5):
-        R['brake'] = max(R['brake'], 0.75)
-        R['accel'] = min(R['accel'], 0.08)
     R['gear'] = shift_gears(S)
-    
 
 # ================= MAIN LOOP =================
-# This is the ONLY main loop - it uses drive_modular with predictive braking!
 if __name__ == "__main__":
-    print("Starting TORCS AI with improved drive_modular function...")
-    print("Using predictive braking for Corkscrew track!")
+    print("=" * 60)
+    print("LAGUNA SECA OPTIMIZED RACING AI")
+    print("F1 Configuration - Maximum Attack Mode")
+    print("=" * 60)
     C = Client(p=3001)
     for step in range(C.maxSteps, 0, -1):
         C.get_servers_input()
-        drive_modular(C)  # Uses the improved function with track sensors!
+        drive_optimized(C)
         C.respond_to_server()
-    C.shutdown()  # Only shutdown after race completes
+    C.shutdown()
