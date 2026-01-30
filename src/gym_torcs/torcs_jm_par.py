@@ -534,7 +534,11 @@ def calculate_target_speed(S, R, min_track_ahead, avg_track_ahead):
     # Guide-based corner targeting using lookahead + elevation cues
     # Tight hairpins / very short lookahead
     if min_track_ahead < 22:
-        base = min(base, T11_TARGET)
+        # Use distFromStart to separate T1/2 from the final hairpin (T11).
+        if S.get('distFromStart', 0) < 400:
+            base = min(base, T1T2_TARGET)
+        else:
+            base = min(base, T11_TARGET)
     elif min_track_ahead < 28:
         base = min(base, T1T2_TARGET)
     elif min_track_ahead < 34:
@@ -544,9 +548,9 @@ def calculate_target_speed(S, R, min_track_ahead, avg_track_ahead):
     elif min_track_ahead < 55:
         base = min(base, T4_TARGET)
     # Corkscrew: downhill + tight lookahead
-    # Corkscrew: detect earlier (downhill-ish + tightish lookahead) and force low speed
+    # Corkscrew: only enforce at the sudden drop (avoid slowing for too long)
     speedZ = S.get('speedZ', 0)
-    if (speedZ < -0.30 and min_track_ahead < 60) or (speedZ < -0.45 and min_track_ahead < 75):
+    if (speedZ < -0.60 and min_track_ahead < 45) or (speedZ < -0.80 and min_track_ahead < 60):
         base = min(base, CORKSCREW_TARGET)
 
     # Rainey Curve (T9): downhill but open
@@ -676,12 +680,12 @@ def drive_modular(c):
     R['brake'] = apply_brakes(S, target_speed)
     R['accel'] = calculate_throttle(S, R, target_speed)
     R['accel'] = traction_control(S, R['accel'])
-    # Hard corkscrew enforcement to reach ~50 km/h
+    # Hard corkscrew enforcement only at the sudden drop
     speedZ = S.get('speedZ', 0)
-    in_corkscrew = (speedZ < -0.30 and min_track_ahead < 60) or (speedZ < -0.45 and min_track_ahead < 75)
+    in_corkscrew = (speedZ < -0.60 and min_track_ahead < 45) or (speedZ < -0.80 and min_track_ahead < 60)
     if in_corkscrew and S.get('speedX', 0) > (CORKSCREW_TARGET + 5):
-        R['brake'] = max(R['brake'], 0.7)
-        R['accel'] = min(R['accel'], 0.1)
+        R['brake'] = max(R['brake'], 0.75)
+        R['accel'] = min(R['accel'], 0.08)
     R['gear'] = shift_gears(S)
     
 
