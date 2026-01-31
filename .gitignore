@@ -314,3 +314,18 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,eclipse,macos,windows,linux
+
+### TORCS ###
+# TORCS simulator binaries and installation files
+torcs/
+torcs-*/
+*.torcs
+
+# TORCS runtime files
+quickrace/
+results/
+logs/
+*.xml.bak
+
+# SCR client logs
+scr_*.log
